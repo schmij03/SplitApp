@@ -59,4 +59,5 @@ test('Geldformatierung und Eingaben', () => {
   assert.equal(parseAmountInput("1'250,50"), 1250.5);
   assert.equal(parseAmountInput('abc'), null);
   assert.match(formatMoney(125050, 'CHF'), /1.250\.50/);
+  assert.equal(formatMoney(-9334, 'CHF'), `-${formatMoney(9334, 'CHF')}`);
 });

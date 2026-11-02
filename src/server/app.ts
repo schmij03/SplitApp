@@ -33,6 +33,10 @@ export function createApp(db: DB) {
       resourceName: 'SplitApp',
       scopesSupported: [SCOPE],
       serviceDocumentationUrl: new URL('/connect', config.publicUrl),
+      // Claude und ChatGPT rufen /token von gemeinsam genutzten Server-IPs auf: grosszügigere Limits.
+      tokenOptions: { rateLimit: { windowMs: 15 * 60 * 1000, max: 1000 } },
+      // Client-Secrets nicht nach 30 Tagen ablaufen lassen, sonst müssten sich Claude/ChatGPT monatlich neu verbinden.
+      clientRegistrationOptions: { clientSecretExpirySeconds: 0, rateLimit: { windowMs: 60 * 60 * 1000, max: 200 } },
     }),
   );
   // Einige Clients fragen die Protected-Resource-Metadaten ohne Pfadsuffix ab.

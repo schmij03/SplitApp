@@ -39,9 +39,10 @@ export function fromMinor(minor: number, currency: string): number {
 }
 
 export function formatMoney(minor: number, currency: string, locale = 'de-CH'): string {
-  return new Intl.NumberFormat(locale, { style: 'currency', currency: currency.toUpperCase() }).format(
-    fromMinor(minor, currency),
+  const formatted = new Intl.NumberFormat(locale, { style: 'currency', currency: currency.toUpperCase() }).format(
+    fromMinor(Math.abs(minor), currency),
   );
+  return minor < 0 ? `-${formatted}` : formatted;
 }
 
 /** Parst Benutzereingaben wie "12.50", "12,50" oder "1'250.00". */
