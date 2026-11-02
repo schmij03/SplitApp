@@ -2,15 +2,16 @@
   "name": "splitapp",
   "version": "0.1.0",
   "private": true,
-  "description": "Ausgaben in Gruppen teilen (ähnlich Splitwise). Web-App auf GitHub Pages, API und MCP-Server als Cloudflare Worker.",
+  "description": "Ausgaben in Gruppen teilen (ähnlich Splitwise). Web-App, API und MCP-Server als Cloudflare Worker, Oberfläche optional auf GitHub Pages.",
   "type": "module",
   "scripts": {
+    "predev": "node -e \"require('fs').mkdirSync('dist/web',{recursive:true})\"",
     "dev": "concurrently -n worker,web -c blue,green \"wrangler dev --port 8787\" \"vite\"",
     "build": "vite build",
     "preview": "vite preview",
     "typecheck": "tsc -p src/worker/tsconfig.json && tsc -p src/web/tsconfig.json",
     "db:migrate:local": "wrangler d1 migrations apply DB --local",
-    "deploy:worker": "wrangler d1 migrations apply DB --remote && wrangler deploy",
+    "deploy": "vite build && wrangler d1 migrations apply DB --remote && wrangler deploy",
     "test": "node --import tsx --test tests/split.test.ts",
     "test:e2e": "node scripts/e2e.mjs"
   },

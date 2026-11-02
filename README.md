@@ -1,7 +1,7 @@
 # SplitApp
 
 Ausgaben in Gruppen teilen, ähnlich wie Splitwise: für WG, Ferien, Ausflüge oder Paare.
-Die Oberfläche läuft auf **GitHub Pages**, Daten und Anmeldung auf einem **Cloudflare Worker**.
+Alles läuft gratis auf einem **Cloudflare Worker** (Oberfläche, Daten, Anmeldung), die Oberfläche auf Wunsch zusätzlich auf **GitHub Pages**.
 Mit eingebautem **MCP-Server**, damit du SplitApp direkt in **Claude** oder **ChatGPT** verbinden
 und Ausgaben im Chat erfassen, ändern, löschen und abfragen kannst.
 
@@ -44,49 +44,56 @@ und Ausgaben im Chat erfassen, ändern, löschen und abfragen kannst.
 Mitglieder können in den Tools per ID, per Name oder mit `"me"` angegeben werden. Beträge sind immer
 in der Hauptwährungseinheit (z. B. `12.5` = CHF 12.50).
 
-## Architektur
+## Einrichtung (etwa 5 Minuten)
 
-```
-Browser ──▶ GitHub Pages (React-Oberfläche, statisch)
-                 │  fetch + Bearer-Token
-                 ▼
-Claude / ChatGPT ──▶ Cloudflare Worker ──▶ D1 (SQLite): Benutzer, Gruppen, Ausgaben
-                     /api   Web-API          KV: OAuth-Clients, Grants, Tokens (nur Hashes)
-                     /mcp   MCP-Server
-                     /authorize, /token, /register, /.well-known/*  OAuth 2.1
-```
+[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/schmij03/SplitApp)
 
-GitHub Pages kann nur statische Dateien ausliefern. Alles, was einen Server braucht (Konten, Datenbank,
-Anmeldung für Claude/ChatGPT, MCP), läuft deshalb als **Cloudflare Worker**. Beides ist im Gratis-Kontingent
-für den privaten Gebrauch mehr als ausreichend.
+1. Auf den Knopf klicken
+2. Bei Cloudflare anmelden oder gratis registrieren
+3. GitHub verbinden, wenn Cloudflare danach fragt, und einen Namen für die Kopie des Repos wählen (z. B. `splitapp-deploy`)
+4. **Create and deploy** klicken und warten, bis der Build fertig ist (etwa 2 Minuten)
 
-## Einrichtung (einmalig)
+Cloudflare legt dabei die Datenbank (D1) und den Schlüsselspeicher (KV) selbst an, spielt das Datenbankschema ein
+und zeigt am Ende die Adresse an, z. B. `https://splitapp.<name>.workers.dev`:
 
-1. **Cloudflare-Konto** (gratis) auf [dash.cloudflare.com](https://dash.cloudflare.com) erstellen und einmal
-   *Workers & Pages* öffnen, damit eine `workers.dev`-Subdomain angelegt wird.
-2. **API-Token** erstellen: *Mein Profil → API-Token → Token erstellen → Vorlage «Cloudflare Workers bearbeiten»*
-   und zusätzlich die Berechtigung *Konto → D1 → Bearbeiten* hinzufügen.
-3. **Account-ID** kopieren: *Workers & Pages → Übersicht*, rechte Spalte.
-4. Auf GitHub im Repository unter *Settings → Secrets and variables → Actions* zwei **Secrets** anlegen:
-   `CLOUDFLARE_API_TOKEN` und `CLOUDFLARE_ACCOUNT_ID`.
-5. Unter *Settings → Pages* bei *Source* **GitHub Actions** wählen.
-6. Den Code auf den Branch `main` bringen (Pull Request mergen) oder unter *Actions → Deploy → Run workflow* starten.
+- Web-App: `https://splitapp.<name>.workers.dev`
+- MCP-URL für Claude/ChatGPT: `https://splitapp.<name>.workers.dev/mcp` (steht auch in der App unter «KI verbinden»)
 
-Der Workflow `.github/workflows/deploy.yml` legt beim ersten Lauf die D1-Datenbank und den KV-Namespace an,
-spielt die Datenbank-Migrationen ein, deployt den Worker und danach die Oberfläche auf GitHub Pages:
+Jeder Push auf die Kopie deployt automatisch neu. Registrierung neuer Konten abschalten: in `wrangler.jsonc`
+`ALLOW_REGISTRATION` auf `"false"` setzen.
 
-- Web-App: `https://<github-benutzer>.github.io/<repo>/`
-- MCP-URL: `https://splitapp.<deine-subdomain>.workers.dev/mcp` (steht in der Zusammenfassung des Workflow-Laufs
-  und in der App unter «KI verbinden»)
+### Alternative: Deploy über GitHub Actions, Oberfläche zusätzlich auf GitHub Pages
 
-Optionale **Repository-Variablen** (*Settings → Secrets and variables → Actions → Variables*):
+Ohne Kopie des Repos, dafür mit API-Token:
+
+1. Cloudflare-Konto erstellen und einmal *Workers & Pages* öffnen
+2. API-Token erstellen: *Mein Profil → API-Token → Token erstellen → Vorlage «Cloudflare Workers bearbeiten»*,
+   zusätzlich *Konto → D1 → Bearbeiten*
+3. Im Repository unter *Settings → Secrets and variables → Actions* die Secrets `CLOUDFLARE_API_TOKEN` und
+   `CLOUDFLARE_ACCOUNT_ID` (steht unter *Workers & Pages* rechts) anlegen
+4. Unter *Settings → Pages* bei *Source* **GitHub Actions** wählen
+5. Auf `main` pushen oder *Actions → Deploy → Run workflow*
+
+Ohne diese Secrets überspringt der Workflow `.github/workflows/deploy.yml` den Deploy. Optionale Repository-Variablen:
 
 | Variable | Zweck |
 | --- | --- |
 | `SPLITAPP_API_URL` | Worker-Adresse, falls nicht `*.workers.dev` (z. B. eigene Domain) |
 | `SPLITAPP_WEB_URL` | Adresse der Oberfläche, falls nicht `https://<user>.github.io/<repo>/` |
 
-Registrierung neuer Konten abschalten: in `wrangler.jsonc` `ALLOW_REGISTRATION` auf `"false"` setzen.
+## Architektur
+
+```
+Browser ──▶ Cloudflare Worker ──▶ D1 (SQLite): Benutzer, Gruppen, Ausgaben
+            /        Oberfläche (statisch, optional auch auf GitHub Pages)
+            /api     Web-API          KV: OAuth-Clients, Grants, Tokens (nur Hashes)
+Claude / ChatGPT ──▶ /mcp     MCP-Server
+            /authorize, /token, /register, /.well-known/*  OAuth 2.1
+```
+
+GitHub Pages kann nur statische Dateien ausliefern. Alles, was einen Server braucht (Konten, Datenbank,
+Anmeldung für Claude/ChatGPT, MCP), läuft deshalb als **Cloudflare Worker**, der die Oberfläche gleich mit
+ausliefert. Läuft die Oberfläche zusätzlich auf GitHub Pages, spricht sie den Worker per Bearer-Token an.
 
 ## Lokale Entwicklung
 
@@ -166,7 +173,7 @@ src/
   web/           React-Oberfläche (Vite, Hash-Routing für GitHub Pages)
 migrations/      D1-Datenbankschema
 scripts/         Einrichtung der Cloudflare-Ressourcen, End-to-End-Testlauf
-.github/         Deploy (Worker + Pages) und CI
+.github/         Deploy über GitHub Actions (optional) und CI
 ```
 
 ## Tests

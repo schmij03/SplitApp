@@ -1,4 +1,6 @@
-# Deployt den Cloudflare Worker (API + MCP) und danach die Web-Oberfläche auf GitHub Pages.
+# Deployt den Cloudflare Worker (Oberfläche, API, MCP) und zusätzlich die Oberfläche auf GitHub Pages.
+# Nur nötig, wenn die Secrets CLOUDFLARE_API_TOKEN und CLOUDFLARE_ACCOUNT_ID gesetzt sind.
+# Wer über den «Deploy to Cloudflare»-Knopf deployt, braucht diesen Workflow nicht; er wird dann übersprungen.
 name: Deploy
 
 on:
@@ -16,31 +18,45 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       url: ${{ steps.deploy.outputs.url }}
+      enabled: ${{ steps.check.outputs.enabled }}
     env:
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - name: Zugangsdaten prüfen
+        id: check
+        run: |
+          if [ -z "$CLOUDFLARE_API_TOKEN" ] || [ -z "$CLOUDFLARE_ACCOUNT_ID" ]; then
+            echo "::notice::Keine Cloudflare-Secrets hinterlegt, Deploy übersprungen. Einfachster Weg: «Deploy to Cloudflare»-Knopf im README."
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - if: steps.check.outputs.enabled == 'true'
+        uses: actions/checkout@v4
+      - if: steps.check.outputs.enabled == 'true'
+        uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
-      - run: npm ci
-
-      - name: Zugangsdaten prüfen
-        run: |
-          if [ -z "$CLOUDFLARE_API_TOKEN" ] || [ -z "$CLOUDFLARE_ACCOUNT_ID" ]; then
-            echo "::error::Bitte die Secrets CLOUDFLARE_API_TOKEN und CLOUDFLARE_ACCOUNT_ID im Repository hinterlegen (siehe README)."
-            exit 1
-          fi
+      - if: steps.check.outputs.enabled == 'true'
+        run: npm ci
 
       - name: D1 und KV einrichten
+        if: steps.check.outputs.enabled == 'true'
         run: node scripts/cf-provision.mjs
 
       - name: Datenbank-Migrationen
+        if: steps.check.outputs.enabled == 'true'
         run: npx wrangler d1 migrations apply DB --remote
 
+      - name: Oberfläche für den Worker bauen
+        if: steps.check.outputs.enabled == 'true'
+        run: npm run build
+
       - name: Worker deployen
+        if: steps.check.outputs.enabled == 'true'
         id: deploy
         env:
           SPLITAPP_WEB_URL: ${{ vars.SPLITAPP_WEB_URL }}
@@ -58,6 +74,7 @@ jobs:
   pages:
     name: GitHub Pages
     needs: worker
+    if: needs.worker.outputs.enabled == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read

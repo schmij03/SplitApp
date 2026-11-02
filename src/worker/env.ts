@@ -6,7 +6,7 @@ export interface Env {
   /** Wird von der OAuth-Bibliothek für den defaultHandler bereitgestellt. */
   OAUTH_PROVIDER: OAuthHelpers;
   AUTH_LIMITER?: RateLimit;
-  /** Adresse der Web-Oberfläche (GitHub Pages), z. B. https://user.github.io/SplitApp/ */
+  /** Adresse der Web-Oberfläche, falls nicht vom Worker selbst ausgeliefert (z. B. GitHub Pages) */
   WEB_URL?: string;
   /** Zusätzliche erlaubte Origins für die Web-API, kommagetrennt (z. B. http://localhost:5173) */
   EXTRA_ORIGINS?: string;
