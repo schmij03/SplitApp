@@ -10,7 +10,7 @@ export function ConnectPage() {
     () => (user ? api<{ connections: Connection[] }>('GET', '/connections') : Promise.resolve({ connections: [] })),
     [user?.id],
   );
-  const mcpUrl = cfg.data?.mcpUrl ?? `${location.origin}/mcp`;
+  const mcpUrl = cfg.data?.mcpUrl ?? '…';
 
   return (
     <div className="stack">
@@ -29,7 +29,7 @@ export function ConnectPage() {
           <CopyButton text={mcpUrl} />
         </div>
         {mcpUrl.startsWith('http://') && !mcpUrl.includes('localhost') && (
-          <div className="error-box">Claude und ChatGPT verlangen eine öffentliche HTTPS-Adresse. Setze PUBLIC_URL auf eine https-URL.</div>
+          <div className="error-box">Claude und ChatGPT verlangen eine öffentliche HTTPS-Adresse. Bitte den Worker bei Cloudflare deployen (siehe README).</div>
         )}
       </div>
 
@@ -109,7 +109,6 @@ export function ConnectPage() {
                   <div className="title">{c.clientName}</div>
                   <div className="small muted">
                     Verbunden {formatDateTime(c.connectedAt)}
-                    {c.lastUsedAt && ` · zuletzt aktiv ${formatDateTime(c.lastUsedAt)}`}
                     {c.redirectHost && ` · ${c.redirectHost}`}
                   </div>
                 </span>

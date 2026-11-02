@@ -14,7 +14,7 @@ import {
   useToast,
   viaLabel,
 } from '../components/ui.js';
-import { Link, navigate, useLocation } from '../router.js';
+import { absoluteUrl, Link, navigate, useLocation } from '../router.js';
 
 type Tab = 'expenses' | 'balances' | 'activity' | 'settings';
 
@@ -369,7 +369,7 @@ function GroupSettings({ group, onChanged }: { group: GroupDetail; onChanged: ()
   const [currency, setCurrency] = useState(group.currency);
   const [newMember, setNewMember] = useState('');
   const [error, setError] = useState<unknown>(null);
-  const inviteUrl = `${location.origin}/join/${group.inviteToken}`;
+  const inviteUrl = absoluteUrl(`/join/${group.inviteToken}`);
 
   const run = async (fn: () => Promise<unknown>, message?: string) => {
     setError(null);

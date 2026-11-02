@@ -1,5 +1,5 @@
 import { useState, type FormEvent } from 'react';
-import { api, type User } from '../api.js';
+import { api, tokenStore, type User } from '../api.js';
 import { ErrorBox, useAuth, useToast } from '../components/ui.js';
 import { Link, navigate } from '../router.js';
 
@@ -37,7 +37,8 @@ export function SettingsPage() {
   }
 
   async function logout() {
-    await api('POST', '/auth/logout');
+    await api('POST', '/auth/logout').catch(() => {});
+    tokenStore.set(null);
     setUser(null);
     navigate('/login', true);
   }

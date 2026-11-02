@@ -2,11 +2,26 @@ import { useEffect, useState, type AnchorHTMLAttributes, type MouseEvent } from 
 
 const listeners = new Set<() => void>();
 
+/*
+ * Hash-Routing (z. B. .../SplitApp/#/groups/1), damit die App auf GitHub Pages ohne Server-Rewrites läuft.
+ */
 export function navigate(to: string, replace = false) {
-  if (replace) history.replaceState(null, '', to);
-  else history.pushState(null, '', to);
+  const url = `${location.pathname}${location.search}#${to}`;
+  if (replace) history.replaceState(null, '', url);
+  else history.pushState(null, '', url);
   listeners.forEach((l) => l());
   window.scrollTo(0, 0);
+}
+
+/** Aktuelle Route aus dem Hash, z. B. "/groups/1?expense=3". */
+export function currentRoute(): string {
+  const route = location.hash.replace(/^#/, '');
+  return route.startsWith('/') ? route : '/';
+}
+
+/** Absolute URL zu einer Route (für Einladungslinks). */
+export function absoluteUrl(route: string): string {
+  return `${location.origin}${location.pathname}#${route}`;
 }
 
 export function useLocation() {
@@ -15,18 +30,21 @@ export function useLocation() {
     const update = () => force((n) => n + 1);
     listeners.add(update);
     window.addEventListener('popstate', update);
+    window.addEventListener('hashchange', update);
     return () => {
       listeners.delete(update);
       window.removeEventListener('popstate', update);
+      window.removeEventListener('hashchange', update);
     };
   }, []);
-  return { path: location.pathname, query: new URLSearchParams(location.search) };
+  const [path, search = ''] = currentRoute().split('?');
+  return { path: path!, query: new URLSearchParams(search) };
 }
 
 export function Link({ href, onClick, ...rest }: AnchorHTMLAttributes<HTMLAnchorElement> & { href: string }) {
   return (
     <a
-      href={href}
+      href={`#${href}`}
       onClick={(e: MouseEvent<HTMLAnchorElement>) => {
         onClick?.(e);
         if (e.defaultPrevented || e.metaKey || e.ctrlKey || e.shiftKey || e.button !== 0) return;

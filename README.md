@@ -1,6 +1,7 @@
 # SplitApp
 
 Ausgaben in Gruppen teilen, ähnlich wie Splitwise: für WG, Ferien, Ausflüge oder Paare.
+Die Oberfläche läuft auf **GitHub Pages**, Daten und Anmeldung auf einem **Cloudflare Worker**.
 Mit eingebautem **MCP-Server**, damit du SplitApp direkt in **Claude** oder **ChatGPT** verbinden
 und Ausgaben im Chat erfassen, ändern, löschen und abfragen kannst.
 
@@ -43,62 +44,75 @@ und Ausgaben im Chat erfassen, ändern, löschen und abfragen kannst.
 Mitglieder können in den Tools per ID, per Name oder mit `"me"` angegeben werden. Beträge sind immer
 in der Hauptwährungseinheit (z. B. `12.5` = CHF 12.50).
 
-## Schnellstart (lokal)
+## Architektur
 
-Voraussetzung: **Node.js 22.13 oder neuer** (nutzt das eingebaute SQLite, keine nativen Abhängigkeiten).
+```
+Browser ──▶ GitHub Pages (React-Oberfläche, statisch)
+                 │  fetch + Bearer-Token
+                 ▼
+Claude / ChatGPT ──▶ Cloudflare Worker ──▶ D1 (SQLite): Benutzer, Gruppen, Ausgaben
+                     /api   Web-API          KV: OAuth-Clients, Grants, Tokens (nur Hashes)
+                     /mcp   MCP-Server
+                     /authorize, /token, /register, /.well-known/*  OAuth 2.1
+```
+
+GitHub Pages kann nur statische Dateien ausliefern. Alles, was einen Server braucht (Konten, Datenbank,
+Anmeldung für Claude/ChatGPT, MCP), läuft deshalb als **Cloudflare Worker**. Beides ist im Gratis-Kontingent
+für den privaten Gebrauch mehr als ausreichend.
+
+## Einrichtung (einmalig)
+
+1. **Cloudflare-Konto** (gratis) auf [dash.cloudflare.com](https://dash.cloudflare.com) erstellen und einmal
+   *Workers & Pages* öffnen, damit eine `workers.dev`-Subdomain angelegt wird.
+2. **API-Token** erstellen: *Mein Profil → API-Token → Token erstellen → Vorlage «Cloudflare Workers bearbeiten»*
+   und zusätzlich die Berechtigung *Konto → D1 → Bearbeiten* hinzufügen.
+3. **Account-ID** kopieren: *Workers & Pages → Übersicht*, rechte Spalte.
+4. Auf GitHub im Repository unter *Settings → Secrets and variables → Actions* zwei **Secrets** anlegen:
+   `CLOUDFLARE_API_TOKEN` und `CLOUDFLARE_ACCOUNT_ID`.
+5. Unter *Settings → Pages* bei *Source* **GitHub Actions** wählen.
+6. Den Code auf den Branch `main` bringen (Pull Request mergen) oder unter *Actions → Deploy → Run workflow* starten.
+
+Der Workflow `.github/workflows/deploy.yml` legt beim ersten Lauf die D1-Datenbank und den KV-Namespace an,
+spielt die Datenbank-Migrationen ein, deployt den Worker und danach die Oberfläche auf GitHub Pages:
+
+- Web-App: `https://<github-benutzer>.github.io/<repo>/`
+- MCP-URL: `https://splitapp.<deine-subdomain>.workers.dev/mcp` (steht in der Zusammenfassung des Workflow-Laufs
+  und in der App unter «KI verbinden»)
+
+Optionale **Repository-Variablen** (*Settings → Secrets and variables → Actions → Variables*):
+
+| Variable | Zweck |
+| --- | --- |
+| `SPLITAPP_API_URL` | Worker-Adresse, falls nicht `*.workers.dev` (z. B. eigene Domain) |
+| `SPLITAPP_WEB_URL` | Adresse der Oberfläche, falls nicht `https://<user>.github.io/<repo>/` |
+
+Registrierung neuer Konten abschalten: in `wrangler.jsonc` `ALLOW_REGISTRATION` auf `"false"` setzen.
+
+## Lokale Entwicklung
+
+Voraussetzung: Node.js 20 oder neuer. Cloudflare wird lokal simuliert (workerd, lokale D1 und KV), ein Konto ist nicht nötig.
 
 ```bash
 npm install
 ```
 
 ```bash
-npm run build
+cp .dev.vars.example .dev.vars
 ```
 
 ```bash
-npm start
+npm run db:migrate:local
 ```
-
-Danach läuft die App auf http://localhost:3000. Für die Entwicklung mit Hot Reload:
 
 ```bash
 npm run dev
 ```
 
-(Frontend auf http://localhost:5173, API auf Port 3000.)
-
-## Betrieb im Internet
-
-Claude und ChatGPT verbinden sich von ihren Servern aus. Die App muss deshalb unter einer **öffentlichen
-HTTPS-Adresse** erreichbar sein. Wichtige Umgebungsvariablen (siehe `.env.example`):
-
-| Variable | Bedeutung |
-| --- | --- |
-| `PUBLIC_URL` | Öffentliche Adresse, z. B. `https://split.example.com` (Pflicht) |
-| `APP_SECRET` | Zufälliger geheimer Wert, z. B. aus `openssl rand -hex 32` |
-| `DATA_DIR` | Ordner für die SQLite-Datenbank (persistentes Volume!) |
-| `ALLOW_REGISTRATION` | `false`, um nach dem Einrichten keine neuen Konten mehr zuzulassen |
-| `TRUST_PROXY` | Anzahl Reverse-Proxies vor der App (Standard bei HTTPS: `1`) |
-
-### Mit Docker
-
-```bash
-docker build -t splitapp .
-```
-
-```bash
-docker run -d -p 3000:3000 -v splitapp-data:/data -e PUBLIC_URL=https://split.example.com -e APP_SECRET=$(openssl rand -hex 32) splitapp
-```
-
-Davor einen Reverse-Proxy mit HTTPS (z. B. Caddy, Traefik, nginx) oder eine Plattform wie Fly.io,
-Railway oder Render verwenden. Wichtig ist ein **persistentes Volume** für `/data`.
-
-Zum schnellen Ausprobieren ohne Server reicht auch ein Tunnel, z. B. `cloudflared tunnel --url http://localhost:3000`.
-Die angezeigte HTTPS-Adresse dann als `PUBLIC_URL` setzen und die App neu starten.
+Oberfläche auf http://localhost:5173, Worker auf http://localhost:8787 (MCP: http://localhost:8787/mcp).
 
 ## Mit Claude oder ChatGPT verbinden
 
-Die MCP-URL lautet `https://<deine-domain>/mcp`. Die Seite **«KI verbinden»** in der App zeigt sie mit Kopierknopf an.
+Die MCP-URL lautet `https://<worker-adresse>/mcp`. Die Seite **«KI verbinden»** in der App zeigt sie mit Kopierknopf an.
 
 **Claude** (claude.ai, Desktop, Mobile): Einstellungen → Connectors → *Benutzerdefinierten Connector hinzufügen* →
 URL eintragen → *Verbinden* → bei SplitApp anmelden → *Zugriff erlauben*.
@@ -106,7 +120,7 @@ URL eintragen → *Verbinden* → bei SplitApp anmelden → *Zugriff erlauben*.
 **Claude Code:**
 
 ```bash
-claude mcp add --transport http splitapp https://split.example.com/mcp
+claude mcp add --transport http splitapp https://splitapp.example.workers.dev/mcp
 ```
 
 **ChatGPT:** Einstellungen → Apps & Connectors → Erweitert → *Entwicklermodus* aktivieren → *Erstellen* →
@@ -122,15 +136,19 @@ Claude/ChatGPT                         SplitApp
      │  GET /.well-known/oauth-protected-resource/mcp
      │  GET /.well-known/oauth-authorization-server
      │  POST /register  (Dynamic Client Registration)
-     │  Browser → /authorize ──────────▶  /oauth/consent: Login + «Zugriff erlauben»
+     │  Browser → /authorize ──────────▶  Login + «Zugriff erlauben»
      │  ◀─────────── Redirect mit Code
      │  POST /token (Code + PKCE-Verifier) → Access- und Refresh-Token
      │  POST /mcp mit Bearer-Token ────▶  Tools im Namen des Benutzers
 ```
 
-- OAuth 2.1 mit PKCE (S256), Dynamic Client Registration (RFC 7591), Protected Resource Metadata (RFC 9728)
-- Access-Token 1 Stunde gültig, Refresh-Token 90 Tage mit Rotation
-- Tokens, Codes und Sessions werden nur als SHA-256-Hash gespeichert
+- Umgesetzt mit [`@cloudflare/workers-oauth-provider`](https://github.com/cloudflare/workers-oauth-provider):
+  OAuth 2.1 mit PKCE (S256), Dynamic Client Registration (RFC 7591), Client ID Metadata Documents,
+  Protected Resource Metadata (RFC 9728)
+- Access-Token 1 Stunde gültig; die Verbindung bleibt bestehen, solange sie mindestens alle 90 Tage genutzt wird
+- Wird ein Autorisierungscode zweimal eingelöst, werden alle daraus ausgestellten Tokens widerrufen
+- Tokens, Codes und Sessions werden nur als Hash gespeichert, Passwörter mit PBKDF2-SHA256
+- Anmeldeversuche sind pro IP begrenzt, die Zustimmungsseite ist gegen Einbetten und gefälschte Formulare geschützt
 - Jede Verbindung ist unter «KI verbinden → Verbundene Apps» sichtbar und widerrufbar
 - Jeder Tool-Aufruf prüft, dass der Benutzer Mitglied der betroffenen Gruppe ist
 
@@ -138,14 +156,17 @@ Claude/ChatGPT                         SplitApp
 
 ```
 src/
-  shared/        Geldbeträge, Aufteilungslogik, Schuldenvereinfachung (Server + Web)
-  server/
+  shared/        Geldbeträge, Aufteilungslogik, Schuldenvereinfachung (Worker + Web)
+  worker/
     services/    Geschäftslogik und Berechtigungen (von Web-API und MCP gemeinsam genutzt)
-    routes/      REST-API für die Web-App
-    mcp/         OAuth-Server, Zustimmungsseite, MCP-Tools
-    db.ts        SQLite-Schema (node:sqlite)
-  web/           React-Frontend (Vite)
-tests/           Unit-Tests und End-to-End-Test (OAuth + MCP)
+    mcp/         MCP-Tools
+    api.ts       Web-API (Hono)
+    authorize.ts Anmelde- und Zustimmungsseite für Claude/ChatGPT
+    index.ts     Einstieg: OAuth-Provider, /mcp
+  web/           React-Oberfläche (Vite, Hash-Routing für GitHub Pages)
+migrations/      D1-Datenbankschema
+scripts/         Einrichtung der Cloudflare-Ressourcen, End-to-End-Testlauf
+.github/         Deploy (Worker + Pages) und CI
 ```
 
 ## Tests
@@ -154,6 +175,11 @@ tests/           Unit-Tests und End-to-End-Test (OAuth + MCP)
 npm test
 ```
 
-Der End-to-End-Test startet den Server, registriert einen Benutzer, durchläuft den kompletten OAuth-Ablauf
-wie ein MCP-Client und ruft anschliessend die Tools zum Lesen, Erfassen, Ändern, Löschen und
-Wiederherstellen auf.
+```bash
+npm run test:e2e
+```
+
+Der End-to-End-Test startet den Worker lokal im Cloudflare-Runtime (workerd mit lokaler D1 und KV), registriert
+einen Benutzer, durchläuft den kompletten OAuth-Ablauf wie ein MCP-Client (inklusive Anmeldung und Zustimmung)
+und ruft anschliessend die Tools zum Lesen, Erfassen, Ändern, Löschen und Wiederherstellen auf. Beide laufen
+auch automatisch in GitHub Actions (`ci.yml`).

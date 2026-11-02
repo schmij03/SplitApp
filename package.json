@@ -2,28 +2,26 @@
   "name": "splitapp",
   "version": "0.1.0",
   "private": true,
-  "description": "Ausgaben in Gruppen teilen (ähnlich Splitwise), mit MCP-Server für Claude und ChatGPT",
+  "description": "Ausgaben in Gruppen teilen (ähnlich Splitwise). Web-App auf GitHub Pages, API und MCP-Server als Cloudflare Worker.",
   "type": "module",
-  "engines": {
-    "node": ">=22.13"
-  },
   "scripts": {
-    "dev": "concurrently -n api,web -c blue,green \"tsx watch src/server/index.ts\" \"vite\"",
-    "build": "vite build && tsc -p src/server/tsconfig.json",
-    "start": "node --disable-warning=ExperimentalWarning dist/server/index.js",
-    "typecheck": "tsc -p src/server/tsconfig.json --noEmit && tsc -p src/web/tsconfig.json --noEmit",
-    "test": "node --disable-warning=ExperimentalWarning --import tsx --test tests/*.test.ts"
+    "dev": "concurrently -n worker,web -c blue,green \"wrangler dev --port 8787\" \"vite\"",
+    "build": "vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc -p src/worker/tsconfig.json && tsc -p src/web/tsconfig.json",
+    "db:migrate:local": "wrangler d1 migrations apply DB --local",
+    "deploy:worker": "wrangler d1 migrations apply DB --remote && wrangler deploy",
+    "test": "node --import tsx --test tests/split.test.ts",
+    "test:e2e": "node scripts/e2e.mjs"
   },
   "dependencies": {
+    "@cloudflare/workers-oauth-provider": "^1.2.4",
     "@modelcontextprotocol/sdk": "^1.32.2",
-    "cors": "^2.8.6",
-    "express": "^5.3.0",
-    "express-rate-limit": "^8.7.3",
+    "hono": "^4.13.16",
     "zod": "^4.6.7"
   },
   "devDependencies": {
-    "@types/cors": "^2.8.19",
-    "@types/express": "^5.0.6",
+    "@cloudflare/workers-types": "^5.20261102.1",
     "@types/node": "^26.6.6",
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
@@ -33,6 +31,10 @@
     "react-dom": "^19.3.1",
     "tsx": "^4.23.15",
     "typescript": "^7.0.2",
-    "vite": "^8.3.5"
+    "vite": "^8.3.5",
+    "wrangler": "^4.156.2"
+  },
+  "engines": {
+    "node": ">=20"
   }
 }

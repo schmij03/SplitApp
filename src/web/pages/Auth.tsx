@@ -1,5 +1,5 @@
 import { useState, type FormEvent } from 'react';
-import { api, type User } from '../api.js';
+import { api, tokenStore, type User } from '../api.js';
 import { ErrorBox, useAuth } from '../components/ui.js';
 import { Link, navigate, useLocation } from '../router.js';
 
@@ -9,9 +9,7 @@ export function safeNext(next: string | null) {
 }
 
 function finish(next: string) {
-  // Die OAuth-Zustimmungsseite wird vom Server gerendert, daher dort einen echten Seitenwechsel machen.
-  if (next.startsWith('/oauth/')) window.location.href = next;
-  else navigate(next, true);
+  navigate(next, true);
 }
 
 export function LoginPage() {
@@ -28,7 +26,8 @@ export function LoginPage() {
     setBusy(true);
     setError(null);
     try {
-      const { user } = await api<{ user: User }>('POST', '/auth/login', { email, password });
+      const { user, token } = await api<{ user: User; token: string }>('POST', '/auth/login', { email, password });
+      tokenStore.set(token);
       setUser(user);
       finish(next);
     } catch (err) {
@@ -86,7 +85,8 @@ export function SignupPage() {
     setBusy(true);
     setError(null);
     try {
-      const { user } = await api<{ user: User }>('POST', '/auth/register', { name, email, password });
+      const { user, token } = await api<{ user: User; token: string }>('POST', '/auth/register', { name, email, password });
+      tokenStore.set(token);
       setUser(user);
       finish(next);
     } catch (err) {

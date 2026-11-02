@@ -1,6 +1,6 @@
 import { StrictMode, useEffect, useState } from 'react';
 import { createRoot } from 'react-dom/client';
-import { api, ApiError, type User } from './api.js';
+import { api, ApiError, tokenStore, type User } from './api.js';
 import { AuthContext, ToastProvider } from './components/ui.js';
 import { LoginPage, SignupPage } from './pages/Auth.js';
 import { ConnectPage } from './pages/Connect.js';
@@ -8,28 +8,35 @@ import { DashboardPage } from './pages/Dashboard.js';
 import { GroupPage } from './pages/Group.js';
 import { JoinPage } from './pages/Join.js';
 import { SettingsPage } from './pages/Settings.js';
-import { Link, match, navigate, useLocation } from './router.js';
+import { currentRoute, Link, match, navigate, useLocation } from './router.js';
 import './styles.css';
 
 const PUBLIC_PATHS = ['/login', '/signup', '/connect'];
 
 function App() {
   const [user, setUser] = useState<User | null | undefined>(undefined);
-  const { path } = useLocation();
+  const { path, query } = useLocation();
 
   useEffect(() => {
+    if (!tokenStore.get()) {
+      setUser(null);
+      return;
+    }
     api<{ user: User }>('GET', '/me')
       .then((r) => setUser(r.user))
-      .catch((e) => (e instanceof ApiError && e.status === 401 ? setUser(null) : setUser(null)));
+      .catch((e) => {
+        if (e instanceof ApiError && e.status === 401) tokenStore.set(null);
+        setUser(null);
+      });
   }, []);
 
   useEffect(() => {
     if (user === null && !PUBLIC_PATHS.includes(path)) {
-      navigate(`/login?next=${encodeURIComponent(location.pathname + location.search)}`, true);
+      const here = currentRoute();
+      navigate(here === '/' ? '/login' : `/login?next=${encodeURIComponent(here)}`, true);
     }
     if (user && (path === '/login' || path === '/signup')) {
-      const next = new URLSearchParams(location.search).get('next');
-      if (!next) navigate('/', true);
+      if (!query.get('next')) navigate('/', true);
     }
   }, [user, path]);
 

@@ -1,9 +1,9 @@
 import { CATEGORY_IDS } from '../../shared/categories.js';
 import { formatMoney, fromMinor, isValidCurrency, toMinor } from '../../shared/money.js';
 import { computeShares, SPLIT_TYPES, SplitError, type SplitType } from '../../shared/split.js';
-import { tx } from '../db.js';
+import type { Row } from '../db.js';
 import { badRequest, notFound } from '../errors.js';
-import { logActivity, type Ctx, type Row } from './context.js';
+import { activityStmt, type Ctx } from './context.js';
 import { listMembers, requireMembership } from './groups.js';
 
 export type ExpenseKind = 'expense' | 'payment';
@@ -72,18 +72,16 @@ function validDate(d: string): boolean {
 
 // --- Lesen ----------------------------------------------------------------
 
-function hydrate(ctx: Ctx, rows: Row[]): Expense[] {
+async function hydrate(ctx: Ctx, rows: Row[]): Promise<Expense[]> {
   if (rows.length === 0) return [];
   const ids = rows.map((r) => r.id);
   const ph = ids.map(() => '?').join(',');
-  const payers = ctx.db
-    .prepare(`SELECT expense_id, member_id, amount FROM expense_payers WHERE expense_id IN (${ph}) ORDER BY member_id`)
-    .all(...ids) as Row[];
-  const shares = ctx.db
-    .prepare(
-      `SELECT expense_id, member_id, amount, value FROM expense_shares WHERE expense_id IN (${ph}) ORDER BY member_id`,
-    )
-    .all(...ids) as Row[];
+  const [p, sh] = await ctx.db.batch([
+    ctx.db.stmt(`SELECT expense_id, member_id, amount FROM expense_payers WHERE expense_id IN (${ph}) ORDER BY member_id`, ...ids),
+    ctx.db.stmt(`SELECT expense_id, member_id, amount, value FROM expense_shares WHERE expense_id IN (${ph}) ORDER BY member_id`, ...ids),
+  ]);
+  const payers = p!.results as Row[];
+  const shares = sh!.results as Row[];
   return rows.map((r) => ({
     id: r.id,
     groupId: r.group_id,
@@ -109,8 +107,8 @@ function hydrate(ctx: Ctx, rows: Row[]): Expense[] {
 
 const SELECT_EXPENSE = `SELECT e.*, u.name AS creator_name FROM expenses e LEFT JOIN users u ON u.id = e.created_by`;
 
-export function listExpenses(ctx: Ctx, groupId: number, opts: ListExpensesOptions = {}) {
-  requireMembership(ctx, groupId);
+export async function listExpenses(ctx: Ctx, groupId: number, opts: ListExpensesOptions = {}) {
+  await requireMembership(ctx, groupId);
   const where = ['e.group_id = ?'];
   const params: (string | number)[] = [groupId];
   if (opts.onlyDeleted) where.push('e.deleted_at IS NOT NULL');
@@ -138,33 +136,36 @@ export function listExpenses(ctx: Ctx, groupId: number, opts: ListExpensesOption
     params.push(opts.memberId, opts.memberId);
   }
   const whereSql = where.join(' AND ').replace(/LIKE \?/g, "LIKE ? ESCAPE '\\'");
-  const limit = Math.min(Math.max(opts.limit ?? 50, 1), 500);
-  const offset = Math.max(opts.offset ?? 0, 0);
-  const total = (ctx.db.prepare(`SELECT COUNT(*) AS n FROM expenses e WHERE ${whereSql}`).get(...params) as Row).n;
-  const rows = ctx.db
-    .prepare(`${SELECT_EXPENSE} WHERE ${whereSql} ORDER BY e.date DESC, e.id DESC LIMIT ? OFFSET ?`)
-    .all(...params, limit, offset) as Row[];
-  return { total, limit, offset, expenses: hydrate(ctx, rows) };
+  const limit = Number.isFinite(opts.limit) ? Math.min(Math.max(opts.limit!, 1), 500) : 50;
+  const offset = Number.isFinite(opts.offset) ? Math.max(opts.offset!, 0) : 0;
+  const [count, list] = await ctx.db.batch([
+    ctx.db.stmt(`SELECT COUNT(*) AS n FROM expenses e WHERE ${whereSql}`, ...params),
+    ctx.db.stmt(`${SELECT_EXPENSE} WHERE ${whereSql} ORDER BY e.date DESC, e.id DESC LIMIT ? OFFSET ?`, ...params, limit, offset),
+  ]);
+  const total = (count!.results[0] as Row).n as number;
+  return { total, limit, offset, expenses: await hydrate(ctx, list!.results as Row[]) };
 }
 
-export function getExpense(ctx: Ctx, expenseId: number): Expense {
-  const row = ctx.db.prepare(`${SELECT_EXPENSE} WHERE e.id = ?`).get(expenseId) as Row | undefined;
+export async function getExpense(ctx: Ctx, expenseId: number): Promise<Expense> {
+  const row = await ctx.db.first<Row>(`${SELECT_EXPENSE} WHERE e.id = ?`, expenseId);
   if (!row) throw notFound('Ausgabe nicht gefunden.');
-  requireMembership(ctx, row.group_id);
-  return hydrate(ctx, [row])[0]!;
+  await requireMembership(ctx, row.group_id);
+  return (await hydrate(ctx, [row]))[0]!;
 }
 
 /** Durchsucht alle Gruppen des Benutzers. */
-export function searchExpenses(ctx: Ctx, query: string, limit = 20): Expense[] {
+export async function searchExpenses(ctx: Ctx, query: string, limit = 20): Promise<Expense[]> {
   const like = `%${query.trim().replace(/[%_]/g, (c) => `\\${c}`)}%`;
-  const rows = ctx.db
-    .prepare(
-      `${SELECT_EXPENSE}
-       JOIN members m ON m.group_id = e.group_id AND m.user_id = ?
-       WHERE e.deleted_at IS NULL AND (e.description LIKE ? ESCAPE '\\' OR e.notes LIKE ? ESCAPE '\\')
-       ORDER BY e.date DESC, e.id DESC LIMIT ?`,
-    )
-    .all(ctx.userId, like, like, limit) as Row[];
+  const rows = await ctx.db.all<Row>(
+    `${SELECT_EXPENSE}
+     JOIN members m ON m.group_id = e.group_id AND m.user_id = ?
+     WHERE e.deleted_at IS NULL AND (e.description LIKE ? ESCAPE '\\' OR e.notes LIKE ? ESCAPE '\\')
+     ORDER BY e.date DESC, e.id DESC LIMIT ?`,
+    ctx.userId,
+    like,
+    like,
+    limit,
+  );
   return hydrate(ctx, rows);
 }
 
@@ -183,9 +184,9 @@ interface Normalized {
   shares: { memberId: number; amount: number; value: number | null }[];
 }
 
-function normalize(ctx: Ctx, groupId: number, input: ExpenseInput): Normalized {
-  const group = ctx.db.prepare('SELECT currency FROM groups WHERE id = ?').get(groupId) as Row;
-  const memberIds = new Set(listMembers(ctx, groupId).map((m) => m.id));
+async function normalize(ctx: Ctx, groupId: number, input: ExpenseInput): Promise<Normalized> {
+  const group = (await ctx.db.first<Row>('SELECT currency FROM groups WHERE id = ?', groupId))!;
+  const memberIds = new Set((await listMembers(ctx, groupId)).map((m) => m.id));
   const kind: ExpenseKind = input.kind ?? 'expense';
 
   const description = String(input.description ?? '').trim();
@@ -271,40 +272,47 @@ function normalize(ctx: Ctx, groupId: number, input: ExpenseInput): Normalized {
   return { kind, description, amount, currency, date, category, notes, splitType: input.splitType, payers, shares };
 }
 
-function writeParts(ctx: Ctx, expenseId: number, n: Normalized) {
-  ctx.db.prepare('DELETE FROM expense_payers WHERE expense_id = ?').run(expenseId);
-  ctx.db.prepare('DELETE FROM expense_shares WHERE expense_id = ?').run(expenseId);
-  const insP = ctx.db.prepare('INSERT INTO expense_payers (expense_id, member_id, amount) VALUES (?, ?, ?)');
-  for (const p of n.payers) insP.run(expenseId, p.memberId, p.amount);
-  const insS = ctx.db.prepare('INSERT INTO expense_shares (expense_id, member_id, amount, value) VALUES (?, ?, ?, ?)');
-  for (const s of n.shares) insS.run(expenseId, s.memberId, s.amount, s.value);
+function partStmts(ctx: Ctx, expenseId: number, n: Normalized): D1PreparedStatement[] {
+  return [
+    ctx.db.stmt('DELETE FROM expense_payers WHERE expense_id = ?', expenseId),
+    ctx.db.stmt('DELETE FROM expense_shares WHERE expense_id = ?', expenseId),
+    ...n.payers.map((p) =>
+      ctx.db.stmt('INSERT INTO expense_payers (expense_id, member_id, amount) VALUES (?, ?, ?)', expenseId, p.memberId, p.amount),
+    ),
+    ...n.shares.map((sh) =>
+      ctx.db.stmt(
+        'INSERT INTO expense_shares (expense_id, member_id, amount, value) VALUES (?, ?, ?, ?)',
+        expenseId,
+        sh.memberId,
+        sh.amount,
+        sh.value,
+      ),
+    ),
+  ];
 }
 
 function label(n: { kind: ExpenseKind; description: string; amount: number; currency: string }) {
   return `«${n.description}» (${formatMoney(n.amount, n.currency)})`;
 }
 
-export function createExpense(ctx: Ctx, groupId: number, input: ExpenseInput): Expense {
-  requireMembership(ctx, groupId);
-  const n = normalize(ctx, groupId, input);
-  const id = tx(ctx.db, () => {
-    const res = ctx.db
-      .prepare(
-        `INSERT INTO expenses (group_id, kind, description, amount, currency, date, category, notes, split_type, created_by, created_via)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      )
-      .run(groupId, n.kind, n.description, n.amount, n.currency, n.date, n.category, n.notes, n.splitType, ctx.userId, ctx.via);
-    const expenseId = Number(res.lastInsertRowid);
-    writeParts(ctx, expenseId, n);
-    logActivity(
+export async function createExpense(ctx: Ctx, groupId: number, input: ExpenseInput): Promise<Expense> {
+  await requireMembership(ctx, groupId);
+  const n = await normalize(ctx, groupId, input);
+  const id = await ctx.db.insertWithId('expenses', (expenseId) => [
+    ctx.db.stmt(
+      `INSERT INTO expenses (id, group_id, kind, description, amount, currency, date, category, notes, split_type, created_by, created_via)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      expenseId, groupId, n.kind, n.description, n.amount, n.currency, n.date, n.category, n.notes, n.splitType, ctx.userId, ctx.via,
+    ),
+    ...partStmts(ctx, expenseId, n),
+    activityStmt(
       ctx,
       groupId,
       n.kind === 'payment' ? 'payment.create' : 'expense.create',
       n.kind === 'payment' ? `hat eine Zahlung über ${formatMoney(n.amount, n.currency)} erfasst` : `hat ${label(n)} hinzugefügt`,
       expenseId,
-    );
-    return expenseId;
-  });
+    ),
+  ]);
   return getExpense(ctx, id);
 }
 
@@ -327,8 +335,8 @@ export function toInput(e: Expense): ExpenseInput {
   };
 }
 
-export function updateExpense(ctx: Ctx, expenseId: number, patch: ExpenseUpdate): Expense {
-  const existing = getExpense(ctx, expenseId);
+export async function updateExpense(ctx: Ctx, expenseId: number, patch: ExpenseUpdate): Promise<Expense> {
+  const existing = await getExpense(ctx, expenseId);
   if (existing.deletedAt) throw badRequest('Gelöschte Ausgaben müssen zuerst wiederhergestellt werden.');
   const base = toInput(existing);
   const merged: ExpenseInput = { ...base, kind: existing.kind };
@@ -354,50 +362,45 @@ export function updateExpense(ctx: Ctx, expenseId: number, patch: ExpenseUpdate)
     else throw badRequest('Bei exakter Aufteilung bitte beim Ändern des Betrags auch «split» mit den neuen Beträgen angeben.');
   }
 
-  const n = normalize(ctx, existing.groupId, merged);
-  tx(ctx.db, () => {
-    ctx.db
-      .prepare(
-        `UPDATE expenses SET description = ?, amount = ?, currency = ?, date = ?, category = ?, notes = ?, split_type = ?,
-         updated_by = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = ?`,
-      )
-      .run(n.description, n.amount, n.currency, n.date, n.category, n.notes, n.splitType, ctx.userId, expenseId);
-    writeParts(ctx, expenseId, n);
-    logActivity(
-      ctx,
-      existing.groupId,
-      existing.kind === 'payment' ? 'payment.update' : 'expense.update',
-      `hat ${label(n)} bearbeitet`,
-      expenseId,
-    );
-  });
+  const n = await normalize(ctx, existing.groupId, merged);
+  await ctx.db.batch([
+    ctx.db.stmt(
+      `UPDATE expenses SET description = ?, amount = ?, currency = ?, date = ?, category = ?, notes = ?, split_type = ?,
+       updated_by = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = ?`,
+      n.description, n.amount, n.currency, n.date, n.category, n.notes, n.splitType, ctx.userId, expenseId,
+    ),
+    ...partStmts(ctx, expenseId, n),
+    activityStmt(ctx, existing.groupId, existing.kind === 'payment' ? 'payment.update' : 'expense.update', `hat ${label(n)} bearbeitet`, expenseId),
+  ]);
   return getExpense(ctx, expenseId);
 }
 
 /** Löscht eine Ausgabe (weich, kann mit restoreExpense rückgängig gemacht werden). */
-export function deleteExpense(ctx: Ctx, expenseId: number): Expense {
-  const e = getExpense(ctx, expenseId);
+export async function deleteExpense(ctx: Ctx, expenseId: number): Promise<Expense> {
+  const e = await getExpense(ctx, expenseId);
   if (e.deletedAt) return e;
-  ctx.db
-    .prepare(`UPDATE expenses SET deleted_at = strftime('%Y-%m-%dT%H:%M:%fZ','now'), deleted_by = ? WHERE id = ?`)
-    .run(ctx.userId, expenseId);
-  logActivity(ctx, e.groupId, e.kind === 'payment' ? 'payment.delete' : 'expense.delete', `hat ${label(e)} gelöscht`, expenseId);
+  await ctx.db.batch([
+    ctx.db.stmt(`UPDATE expenses SET deleted_at = strftime('%Y-%m-%dT%H:%M:%fZ','now'), deleted_by = ? WHERE id = ?`, ctx.userId, expenseId),
+    activityStmt(ctx, e.groupId, e.kind === 'payment' ? 'payment.delete' : 'expense.delete', `hat ${label(e)} gelöscht`, expenseId),
+  ]);
   return getExpense(ctx, expenseId);
 }
 
-export function restoreExpense(ctx: Ctx, expenseId: number): Expense {
-  const e = getExpense(ctx, expenseId);
+export async function restoreExpense(ctx: Ctx, expenseId: number): Promise<Expense> {
+  const e = await getExpense(ctx, expenseId);
   if (!e.deletedAt) return e;
-  ctx.db.prepare('UPDATE expenses SET deleted_at = NULL, deleted_by = NULL WHERE id = ?').run(expenseId);
-  logActivity(ctx, e.groupId, 'expense.restore', `hat ${label(e)} wiederhergestellt`, expenseId);
+  await ctx.db.batch([
+    ctx.db.stmt('UPDATE expenses SET deleted_at = NULL, deleted_by = NULL WHERE id = ?', expenseId),
+    activityStmt(ctx, e.groupId, 'expense.restore', `hat ${label(e)} wiederhergestellt`, expenseId),
+  ]);
   return getExpense(ctx, expenseId);
 }
 
-export function recordPayment(
+export async function recordPayment(
   ctx: Ctx,
   groupId: number,
   input: { fromMemberId: number; toMemberId: number; amount: number; currency?: string; date?: string; notes?: string | null },
-): Expense {
+): Promise<Expense> {
   return createExpense(ctx, groupId, {
     kind: 'payment',
     description: 'Zahlung',

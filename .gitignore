@@ -5,3 +5,5 @@ data/
 *.db-*
 .env
 .DS_Store
+.wrangler/
+.dev.vars

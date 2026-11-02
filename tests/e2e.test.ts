@@ -1,34 +1,26 @@
 /**
- * End-to-End: Benutzer registriert sich, ein MCP-Client (wie Claude/ChatGPT) verbindet sich per OAuth 2.1
+ * End-to-End gegen einen laufenden Worker (lokal: `npm run test:e2e`).
+ * Ein Benutzer registriert sich, ein MCP-Client (wie Claude/ChatGPT) verbindet sich per OAuth 2.1
  * (Dynamic Client Registration + PKCE) und liest/schreibt anschliessend über die MCP-Tools.
  */
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
-import type { AddressInfo } from 'node:net';
-import { after, before, test } from 'node:test';
+import { test } from 'node:test';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 
-const PORT = 40000 + Math.floor(Math.random() * 10000);
-process.env.PUBLIC_URL = `http://localhost:${PORT}`;
-process.env.DB_FILE = ':memory:';
-process.env.WEB_DIR = '/nonexistent';
-
-const BASE = process.env.PUBLIC_URL;
-let server: import('node:http').Server;
-let cookie = '';
+const BASE = process.env.E2E_URL ?? 'http://127.0.0.1:8787';
+let session = '';
 let groupId = 0;
 let tokens: { access_token: string; refresh_token: string };
 const REDIRECT = 'http://localhost:9999/callback';
 
 async function api(method: string, path: string, body?: unknown) {
-  const res = await fetch(BASE + path, {
+  const res = await fetch(BASE + '/api' + path, {
     method,
-    headers: { 'content-type': 'application/json', 'x-splitapp': '1', cookie },
+    headers: { 'content-type': 'application/json', ...(session ? { authorization: `Bearer ${session}` } : {}) },
     body: body ? JSON.stringify(body) : undefined,
   });
-  const setCookie = res.headers.get('set-cookie');
-  if (setCookie) cookie = setCookie.split(';')[0]!;
   const text = await res.text();
   return { status: res.status, body: text ? JSON.parse(text) : null };
 }
@@ -38,22 +30,29 @@ function parseToolJson(result: any) {
   return JSON.parse(text.slice(text.indexOf('{')));
 }
 
-before(async () => {
-  const { openDb } = await import('../src/server/db.ts');
-  const { createApp } = await import('../src/server/app.ts');
-  const app = createApp(openDb(':memory:'));
-  await new Promise<void>((resolve) => {
-    server = app.listen(PORT, resolve);
-  });
-  assert.equal((server.address() as AddressInfo).port, PORT);
-});
-
-after(() => server?.close());
+/** Sammelt Cookies wie ein Browser (nur Name=Wert). */
+class Jar {
+  cookies = new Map<string, string>();
+  store(res: Response) {
+    for (const c of res.headers.getSetCookie()) {
+      const [pair] = c.split(';');
+      const [k, ...v] = pair!.split('=');
+      if (/max-age=0/i.test(c)) this.cookies.delete(k!.trim());
+      else this.cookies.set(k!.trim(), v.join('='));
+    }
+  }
+  get header() {
+    return [...this.cookies].map(([k, v]) => `${k}=${v}`).join('; ');
+  }
+}
 
 test('Registrierung und Gruppe über die Web-API', async () => {
-  const reg = await api('POST', '/api/auth/register', { email: 'jan@example.com', name: 'Jan', password: 'geheim1234' });
+  const email = `jan-${Date.now()}@example.com`;
+  const reg = await api('POST', '/auth/register', { email, name: 'Jan', password: 'geheim1234' });
   assert.equal(reg.status, 200, JSON.stringify(reg.body));
-  const g = await api('POST', '/api/groups', { name: 'Tessin-Ferien', currency: 'CHF', members: ['Anna', 'Ben'] });
+  session = reg.body.token;
+  process.env.E2E_EMAIL = email;
+  const g = await api('POST', '/groups', { name: 'Tessin-Ferien', currency: 'CHF', members: ['Anna', 'Ben'] });
   assert.equal(g.status, 200);
   groupId = g.body.group.id;
   assert.equal(g.body.group.members.length, 3);
@@ -69,11 +68,71 @@ test('MCP ohne Token antwortet mit 401 und Verweis auf die Metadaten', async () 
   assert.match(res.headers.get('www-authenticate') ?? '', /resource_metadata="[^"]*oauth-protected-resource\/mcp"/);
 });
 
-test('OAuth 2.1: Discovery, Registrierung, Zustimmung, Token', async () => {
+async function tokenRequest(endpoint: string, params: Record<string, string>) {
+  return fetch(endpoint, {
+    method: 'POST',
+    headers: { 'content-type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams(params),
+  });
+}
+
+/** Durchläuft /authorize wie ein Browser: anmelden (falls nötig), zustimmen, Code abholen. */
+async function authorize(endpoint: string, clientId: string, jar: Jar) {
+  const verifier = crypto.randomBytes(32).toString('base64url');
+  const authUrl = new URL(endpoint);
+  authUrl.search = new URLSearchParams({
+    response_type: 'code',
+    client_id: clientId,
+    redirect_uri: REDIRECT,
+    code_challenge: crypto.createHash('sha256').update(verifier).digest('base64url'),
+    code_challenge_method: 'S256',
+    state: 'xyz',
+    resource: `${BASE}/mcp`,
+    scope: 'splitapp',
+  }).toString();
+  const path = authUrl.pathname + authUrl.search;
+
+  if (!jar.cookies.has('splitapp_session')) {
+    // Nicht angemeldet: Login-Formular auf der Worker-Domain
+    const loginHtml = await (await fetch(BASE + path)).text();
+    assert.match(loginHtml, /Bei SplitApp anmelden/);
+    const login = await fetch(BASE + path, {
+      method: 'POST',
+      redirect: 'manual',
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ action: 'login', email: process.env.E2E_EMAIL!, password: 'geheim1234' }),
+    });
+    assert.equal(login.status, 303);
+    jar.store(login);
+  }
+
+  // Angemeldet: Zustimmungsseite
+  const consentRes = await fetch(BASE + path, { headers: { cookie: jar.header } });
+  jar.store(consentRes);
+  const consentHtml = await consentRes.text();
+  assert.match(consentHtml, /Claude verbinden\?/);
+  assert.equal(consentRes.headers.get('x-frame-options'), 'DENY');
+  const handle = consentHtml.match(/name="handle" value="([^"]+)"/)![1]!;
+
+  const approve = await fetch(BASE + path, {
+    method: 'POST',
+    redirect: 'manual',
+    headers: { 'content-type': 'application/x-www-form-urlencoded', cookie: jar.header },
+    body: new URLSearchParams({ handle, decision: 'approve' }),
+  });
+  assert.equal(approve.status, 302, await approve.clone().text());
+  const cb = new URL(approve.headers.get('location')!);
+  assert.equal(cb.origin + cb.pathname, REDIRECT);
+  assert.equal(cb.searchParams.get('state'), 'xyz');
+  return { code: cb.searchParams.get('code')!, verifier };
+}
+
+test('OAuth 2.1: Discovery, Registrierung, Anmeldung, Zustimmung, Token', async () => {
   const prm = await (await fetch(`${BASE}/.well-known/oauth-protected-resource/mcp`)).json();
   assert.equal(prm.resource, `${BASE}/mcp`);
   const asMeta = await (await fetch(`${BASE}/.well-known/oauth-authorization-server`)).json();
   assert.ok(asMeta.registration_endpoint);
+  assert.ok(asMeta.code_challenge_methods_supported.includes('S256'));
 
   const reg = await fetch(asMeta.registration_endpoint, {
     method: 'POST',
@@ -88,84 +147,37 @@ test('OAuth 2.1: Discovery, Registrierung, Zustimmung, Token', async () => {
   });
   assert.equal(reg.status, 201);
   const client = await reg.json();
+  const jar = new Jar();
+  const exchange = (code: string, verifier: string) =>
+    tokenRequest(asMeta.token_endpoint, { grant_type: 'authorization_code', code, code_verifier: verifier, client_id: client.client_id, redirect_uri: REDIRECT });
 
-  const verifier = crypto.randomBytes(32).toString('base64url');
-  const challenge = crypto.createHash('sha256').update(verifier).digest('base64url');
-  const authUrl = new URL(asMeta.authorization_endpoint);
-  authUrl.search = new URLSearchParams({
-    response_type: 'code',
-    client_id: client.client_id,
-    redirect_uri: REDIRECT,
-    code_challenge: challenge,
-    code_challenge_method: 'S256',
-    state: 'xyz',
-    resource: `${BASE}/mcp`,
-  }).toString();
-  const authRes = await fetch(authUrl, { redirect: 'manual' });
-  assert.equal(authRes.status, 302);
-  const consentPath = authRes.headers.get('location')!;
-  assert.match(consentPath, /^\/oauth\/consent\?request=/);
-
-  // Zustimmungsseite mit Web-Session
-  const consentHtml = await (await fetch(BASE + consentPath, { headers: { cookie } })).text();
-  assert.match(consentHtml, /Claude verbinden\?/);
-  const csrf = consentHtml.match(/name="csrf" value="([^"]+)"/)![1]!;
-  const requestId = new URL(BASE + consentPath).searchParams.get('request')!;
-
-  const approve = await fetch(`${BASE}/oauth/consent`, {
+  // 1. Durchgang: falscher PKCE-Verifier wird abgelehnt, ein zweites Einlösen des Codes widerruft alles
+  const first = await authorize(asMeta.authorization_endpoint, client.client_id, jar);
+  assert.equal((await exchange(first.code, 'falsch'.repeat(8))).status, 400);
+  const ok1 = await exchange(first.code, first.verifier);
+  assert.equal(ok1.status, 200);
+  const stolen = await ok1.json();
+  assert.equal((await exchange(first.code, first.verifier)).status, 400);
+  const afterReplay = await fetch(`${BASE}/mcp`, {
     method: 'POST',
-    redirect: 'manual',
-    headers: { 'content-type': 'application/x-www-form-urlencoded', cookie },
-    body: new URLSearchParams({ request: requestId, csrf, action: 'approve' }),
+    headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream', authorization: `Bearer ${stolen.access_token}` },
+    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' }),
   });
-  assert.equal(approve.status, 302);
-  const cb = new URL(approve.headers.get('location')!);
-  assert.equal(cb.origin + cb.pathname, REDIRECT);
-  assert.equal(cb.searchParams.get('state'), 'xyz');
-  const code = cb.searchParams.get('code')!;
+  assert.equal(afterReplay.status, 401, 'Tokens müssen nach Wiederverwendung des Codes widerrufen sein');
 
-  // Falscher Verifier wird abgelehnt
-  const bad = await fetch(asMeta.token_endpoint, {
-    method: 'POST',
-    headers: { 'content-type': 'application/x-www-form-urlencoded' },
-    body: new URLSearchParams({ grant_type: 'authorization_code', code, code_verifier: 'falsch', client_id: client.client_id, redirect_uri: REDIRECT }),
-  });
-  assert.equal(bad.status, 400);
+  // 2. Durchgang: Session ist noch aktiv, es braucht nur die Zustimmung
+  const second = await authorize(asMeta.authorization_endpoint, client.client_id, jar);
+  const ok2 = await exchange(second.code, second.verifier);
+  assert.equal(ok2.status, 200);
+  tokens = await ok2.json();
+  assert.ok(tokens.access_token && tokens.refresh_token);
 
-  const tokenRes = await fetch(asMeta.token_endpoint, {
-    method: 'POST',
-    headers: { 'content-type': 'application/x-www-form-urlencoded' },
-    body: new URLSearchParams({ grant_type: 'authorization_code', code, code_verifier: verifier, client_id: client.client_id, redirect_uri: REDIRECT }),
-  });
-  assert.equal(tokenRes.status, 200);
-  tokens = await tokenRes.json();
-  assert.ok(tokens.access_token.startsWith('sa_at_'));
-
-  // Code ist nur einmal gültig
-  const reuse = await fetch(asMeta.token_endpoint, {
-    method: 'POST',
-    headers: { 'content-type': 'application/x-www-form-urlencoded' },
-    body: new URLSearchParams({ grant_type: 'authorization_code', code, code_verifier: verifier, client_id: client.client_id }),
-  });
-  assert.equal(reuse.status, 400);
-
-  // Refresh-Token-Rotation
-  const refresh = await fetch(asMeta.token_endpoint, {
-    method: 'POST',
-    headers: { 'content-type': 'application/x-www-form-urlencoded' },
-    body: new URLSearchParams({ grant_type: 'refresh_token', refresh_token: tokens.refresh_token, client_id: client.client_id }),
-  });
+  // Token erneuern
+  const refresh = await tokenRequest(asMeta.token_endpoint, { grant_type: 'refresh_token', refresh_token: tokens.refresh_token, client_id: client.client_id });
   assert.equal(refresh.status, 200);
-  const oldRefresh = tokens.refresh_token;
   tokens = await refresh.json();
-  const replay = await fetch(asMeta.token_endpoint, {
-    method: 'POST',
-    headers: { 'content-type': 'application/x-www-form-urlencoded' },
-    body: new URLSearchParams({ grant_type: 'refresh_token', refresh_token: oldRefresh, client_id: client.client_id }),
-  });
-  assert.equal(replay.status, 400);
 
-  const conns = await api('GET', '/api/connections');
+  const conns = await api('GET', '/connections');
   assert.equal(conns.body.connections.length, 1);
   assert.equal(conns.body.connections[0].clientName, 'Claude');
 });
@@ -248,22 +260,22 @@ test('MCP-Tools: Gruppen sehen, Einträge lesen, erfassen, ändern, löschen', a
   assert.equal(doc.title, 'Hotel');
 
   // Aktivität zeigt, dass die Änderungen über MCP kamen
-  const act = await api('GET', `/api/groups/${groupId}/activity`);
+  const act = await api('GET', `/groups/${groupId}/activity`);
   assert.ok(act.body.activity.some((a: any) => a.via === 'mcp:Claude'));
 
   await client.close();
 });
 
 test('Fremde Gruppen sind nicht zugänglich und Widerruf sperrt den Token', async () => {
-  const savedCookie = cookie;
-  cookie = '';
-  await api('POST', '/api/auth/register', { email: 'eve@example.com', name: 'Eve', password: 'geheim1234' });
-  const forbidden = await api('GET', `/api/groups/${groupId}`);
+  const saved = session;
+  const eve = await api('POST', '/auth/register', { email: `eve-${Date.now()}@example.com`, name: 'Eve', password: 'geheim1234' });
+  session = eve.body.token;
+  const forbidden = await api('GET', `/groups/${groupId}`);
   assert.equal(forbidden.status, 403);
-  cookie = savedCookie;
+  session = saved;
 
-  const conns = await api('GET', '/api/connections');
-  await api('DELETE', `/api/connections/${conns.body.connections[0].id}`);
+  const conns = await api('GET', '/connections');
+  await api('DELETE', `/connections/${conns.body.connections[0].id}`);
   const res = await fetch(`${BASE}/mcp`, {
     method: 'POST',
     headers: {

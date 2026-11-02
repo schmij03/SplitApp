@@ -4,7 +4,6 @@ import { z } from 'zod';
 import { CATEGORY_IDS } from '../../shared/categories.js';
 import { formatMoney, fromMinor } from '../../shared/money.js';
 import { SPLIT_TYPES } from '../../shared/split.js';
-import { config } from '../config.js';
 import { AppError, badRequest } from '../errors.js';
 import type { Ctx } from '../services/context.js';
 import * as expenses from '../services/expenses.js';
@@ -74,8 +73,11 @@ function resolveMember(members: Member[], ref: number | string): Member {
 
 const list = (members: Member[]) => members.map((m) => `${m.id}=${m.name}${m.isMe ? ' (du)' : ''}`).join(', ');
 
-const groupUrl = (groupId: number) => new URL(`/groups/${groupId}`, config.publicUrl).href;
-const expenseUrl = (e: Expense) => new URL(`/groups/${e.groupId}?expense=${e.id}`, config.publicUrl).href;
+/** Erzeugt Links in die Web-App. */
+export type LinkFn = (path: string) => string;
+let link: LinkFn = (p) => p;
+const groupUrl = (groupId: number) => link(`/groups/${groupId}`);
+const expenseUrl = (e: Expense) => link(`/groups/${e.groupId}?expense=${e.id}`);
 
 function money(minor: number, currency: string) {
   return { amount: fromMinor(minor, currency), formatted: formatMoney(minor, currency) };
@@ -127,8 +129,8 @@ function expenseOut(e: Expense, members: Member[]) {
   };
 }
 
-function groupOut(ctx: Ctx, groupId: number) {
-  const g = groups.getGroup(ctx, groupId);
+async function groupOut(ctx: Ctx, groupId: number) {
+  const g = await groups.getGroup(ctx, groupId);
   const name = (id: number) => g.members.find((m) => m.id === id)?.name ?? `#${id}`;
   return {
     id: g.id,
@@ -164,7 +166,7 @@ function ok(data: unknown, summary?: string): CallToolResult {
   };
 }
 
-function wrap<A>(fn: (args: A) => CallToolResult | Promise<CallToolResult>) {
+function wrap<A>(fn: (args: A) => Promise<CallToolResult>) {
   return async (args: A): Promise<CallToolResult> => {
     try {
       return await fn(args);
@@ -217,7 +219,8 @@ function splitInput(members: Member[], args: SplitArgs, isUpdate: boolean): Part
 
 // --- Server -----------------------------------------------------------------
 
-export function buildMcpServer(ctx: Ctx): McpServer {
+export function buildMcpServer(ctx: Ctx, appUrl: string, linkFn: LinkFn): McpServer {
+  link = linkFn;
   const server = new McpServer(
     { name: 'splitapp', title: 'SplitApp', version: '0.1.0' },
     { instructions: INSTRUCTIONS },
@@ -229,9 +232,9 @@ export function buildMcpServer(ctx: Ctx): McpServer {
   server.registerTool(
     'whoami',
     { title: 'Verbundenes Konto', description: 'Zeigt, mit welchem SplitApp-Konto diese Verbindung angemeldet ist.', annotations: readOnly },
-    wrap(() => {
-      const u = getUser(ctx.db, ctx.userId)!;
-      return ok({ user_id: u.id, name: u.name, email: u.email, app_url: config.publicUrl.href });
+    wrap(async () => {
+      const u = (await getUser(ctx.db, ctx.userId))!;
+      return ok({ user_id: u.id, name: u.name, email: u.email, app_url: appUrl });
     }),
   );
 
@@ -242,8 +245,8 @@ export function buildMcpServer(ctx: Ctx): McpServer {
       description: 'Listet alle Gruppen des Benutzers mit seinem Saldo pro Gruppe (positiv = bekommt Geld, negativ = schuldet).',
       annotations: readOnly,
     },
-    wrap(() => {
-      const list = groups.listGroups(ctx).map((g) => ({
+    wrap(async () => {
+      const list = (await groups.listGroups(ctx)).map((g) => ({
         id: g.id,
         name: g.name,
         default_currency: g.currency,
@@ -265,7 +268,7 @@ export function buildMcpServer(ctx: Ctx): McpServer {
       inputSchema: { group_id: z.number().int().describe('ID der Gruppe (aus list_groups)') },
       annotations: readOnly,
     },
-    wrap(({ group_id }) => ok(groupOut(ctx, group_id))),
+    wrap(async ({ group_id }) => ok(await groupOut(ctx, group_id))),
   );
 
   server.registerTool(
@@ -277,14 +280,16 @@ export function buildMcpServer(ctx: Ctx): McpServer {
       inputSchema: { group_id: z.number().int().optional().describe('Optional: nur diese Gruppe') },
       annotations: readOnly,
     },
-    wrap(({ group_id }) => {
+    wrap(async ({ group_id }) => {
       if (group_id !== undefined) {
-        const g = groupOut(ctx, group_id);
+        const g = await groupOut(ctx, group_id);
         return ok({ group_id: g.id, group: g.name, members: g.members, settle_up_suggestions: g.settle_up_suggestions });
       }
       const totals = new Map<string, number>();
-      const perGroup = groups.listGroups(ctx).map((s) => {
-        const g = groups.getGroup(ctx, s.id);
+      const summaries = await groups.listGroups(ctx);
+      const details = await Promise.all(summaries.map((s) => groups.getGroup(ctx, s.id)));
+      const perGroup = summaries.map((s, i) => {
+        const g = details[i]!;
         const name = (id: number) => g.members.find((m) => m.id === id)?.name ?? `#${id}`;
         for (const b of s.myBalance) totals.set(b.currency, (totals.get(b.currency) ?? 0) + b.amount);
         return {
@@ -323,10 +328,10 @@ export function buildMcpServer(ctx: Ctx): McpServer {
       },
       annotations: readOnly,
     },
-    wrap((args) => {
-      groups.requireMembership(ctx, args.group_id);
-      const members = groups.listMembers(ctx, args.group_id);
-      const result = expenses.listExpenses(ctx, args.group_id, {
+    wrap(async (args) => {
+      await groups.requireMembership(ctx, args.group_id);
+      const members = await groups.listMembers(ctx, args.group_id);
+      const result = await expenses.listExpenses(ctx, args.group_id, {
         query: args.query,
         memberId: args.member !== undefined ? resolveMember(members, args.member).id : undefined,
         fromDate: args.from_date,
@@ -353,9 +358,9 @@ export function buildMcpServer(ctx: Ctx): McpServer {
       inputSchema: { expense_id: z.number().int() },
       annotations: readOnly,
     },
-    wrap(({ expense_id }) => {
-      const e = expenses.getExpense(ctx, expense_id);
-      return ok(expenseOut(e, groups.listMembers(ctx, e.groupId)));
+    wrap(async ({ expense_id }) => {
+      const e = await expenses.getExpense(ctx, expense_id);
+      return ok(expenseOut(e, await groups.listMembers(ctx, e.groupId)));
     }),
   );
 
@@ -385,9 +390,9 @@ Beispiele:
       },
       annotations: write,
     },
-    wrap((args) => {
-      groups.requireMembership(ctx, args.group_id);
-      const members = groups.listMembers(ctx, args.group_id);
+    wrap(async (args) => {
+      await groups.requireMembership(ctx, args.group_id);
+      const members = await groups.listMembers(ctx, args.group_id);
       const input: ExpenseInput = {
         description: args.description,
         amount: args.amount,
@@ -397,7 +402,7 @@ Beispiele:
         notes: args.notes,
         ...(splitInput(members, args, false) as Pick<ExpenseInput, 'payers' | 'splitType' | 'split'>),
       };
-      const e = expenses.createExpense(ctx, args.group_id, input);
+      const e = await expenses.createExpense(ctx, args.group_id, input);
       return ok(expenseOut(e, members), `Ausgabe #${e.id} «${e.description}» über ${formatMoney(e.amount, e.currency)} erfasst.`);
     }),
   );
@@ -425,9 +430,9 @@ Bei Zahlungen: paid_by = Sender, split_among = [Empfänger].`,
       },
       annotations: { ...write, idempotentHint: true },
     },
-    wrap((args) => {
-      const existing = expenses.getExpense(ctx, args.expense_id);
-      const members = groups.listMembers(ctx, existing.groupId);
+    wrap(async (args) => {
+      const existing = await expenses.getExpense(ctx, args.expense_id);
+      const members = await groups.listMembers(ctx, existing.groupId);
       const patch: ExpenseUpdate = {
         description: args.description,
         amount: args.amount,
@@ -441,7 +446,7 @@ Bei Zahlungen: paid_by = Sender, split_among = [Empfänger].`,
         patch.splitType = 'exact';
         patch.split = patch.split.map((s) => ({ memberId: s.memberId, value: args.amount ?? fromMinor(existing.amount, existing.currency) }));
       }
-      const e = expenses.updateExpense(ctx, args.expense_id, patch);
+      const e = await expenses.updateExpense(ctx, args.expense_id, patch);
       return ok(expenseOut(e, members), `Eintrag #${e.id} aktualisiert.`);
     }),
   );
@@ -454,10 +459,10 @@ Bei Zahlungen: paid_by = Sender, split_among = [Empfänger].`,
       inputSchema: { expense_id: z.number().int() },
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
     },
-    wrap(({ expense_id }) => {
-      const e = expenses.deleteExpense(ctx, expense_id);
+    wrap(async ({ expense_id }) => {
+      const e = await expenses.deleteExpense(ctx, expense_id);
       return ok(
-        { deleted: true, expense: expenseOut(e, groups.listMembers(ctx, e.groupId)) },
+        { deleted: true, expense: expenseOut(e, await groups.listMembers(ctx, e.groupId)) },
         `Eintrag #${e.id} «${e.description}» gelöscht (wiederherstellbar mit restore_expense).`,
       );
     }),
@@ -471,9 +476,9 @@ Bei Zahlungen: paid_by = Sender, split_among = [Empfänger].`,
       inputSchema: { expense_id: z.number().int() },
       annotations: { ...write, idempotentHint: true },
     },
-    wrap(({ expense_id }) => {
-      const e = expenses.restoreExpense(ctx, expense_id);
-      return ok(expenseOut(e, groups.listMembers(ctx, e.groupId)), `Eintrag #${e.id} wiederhergestellt.`);
+    wrap(async ({ expense_id }) => {
+      const e = await expenses.restoreExpense(ctx, expense_id);
+      return ok(expenseOut(e, await groups.listMembers(ctx, e.groupId)), `Eintrag #${e.id} wiederhergestellt.`);
     }),
   );
 
@@ -493,12 +498,12 @@ Bei Zahlungen: paid_by = Sender, split_among = [Empfänger].`,
       },
       annotations: write,
     },
-    wrap((args) => {
-      groups.requireMembership(ctx, args.group_id);
-      const members = groups.listMembers(ctx, args.group_id);
+    wrap(async (args) => {
+      await groups.requireMembership(ctx, args.group_id);
+      const members = await groups.listMembers(ctx, args.group_id);
       const from = resolveMember(members, args.from ?? 'me');
       const to = resolveMember(members, args.to);
-      const e = expenses.recordPayment(ctx, args.group_id, {
+      const e = await expenses.recordPayment(ctx, args.group_id, {
         fromMemberId: from.id,
         toMemberId: to.id,
         amount: args.amount,
@@ -523,11 +528,11 @@ Bei Zahlungen: paid_by = Sender, split_among = [Empfänger].`,
       },
       annotations: write,
     },
-    wrap((args) => {
-      const g = groups.createGroup(ctx, { name: args.name, currency: args.currency, members: args.members });
-      const out = groupOut(ctx, g.id);
+    wrap(async (args) => {
+      const g = await groups.createGroup(ctx, { name: args.name, currency: args.currency, members: args.members });
+      const out = await groupOut(ctx, g.id);
       return ok(
-        { ...out, invite_link: new URL(`/join/${g.inviteToken}`, config.publicUrl).href },
+        { ...out, invite_link: link(`/join/${g.inviteToken}`) },
         `Gruppe «${g.name}» erstellt.`,
       );
     }),
@@ -541,8 +546,8 @@ Bei Zahlungen: paid_by = Sender, split_among = [Empfänger].`,
       inputSchema: { group_id: z.number().int(), name: z.string().min(1).max(80) },
       annotations: write,
     },
-    wrap(({ group_id, name }) => {
-      const m = groups.addMember(ctx, group_id, name);
+    wrap(async ({ group_id, name }) => {
+      const m = await groups.addMember(ctx, group_id, name);
       return ok({ member_id: m.id, name: m.name, group_id }, `${m.name} wurde hinzugefügt.`);
     }),
   );
@@ -555,9 +560,9 @@ Bei Zahlungen: paid_by = Sender, split_among = [Empfänger].`,
       inputSchema: { group_id: z.number().int(), limit: z.number().int().min(1).max(200).optional() },
       annotations: readOnly,
     },
-    wrap(({ group_id, limit }) =>
+    wrap(async ({ group_id, limit }) =>
       ok({
-        activity: groups.listActivity(ctx, group_id, limit ?? 30).map((a) => ({
+        activity: (await groups.listActivity(ctx, group_id, limit ?? 30)).map((a) => ({
           at: a.createdAt,
           who: a.user?.name ?? 'Unbekannt',
           via: a.via,
@@ -578,14 +583,13 @@ Bei Zahlungen: paid_by = Sender, split_among = [Empfänger].`,
       inputSchema: { query: z.string().describe('Suchbegriff, z. B. "Hotel" oder Gruppenname') },
       annotations: readOnly,
     },
-    wrap(({ query }) => {
+    wrap(async ({ query }) => {
       const q = query.trim().toLowerCase();
-      const groupHits = groups
-        .listGroups(ctx)
+      const groupHits = (await groups.listGroups(ctx))
         .filter((g) => !q || g.name.toLowerCase().includes(q))
         .map((g) => ({ id: `group:${g.id}`, title: `Gruppe: ${g.name}`, url: groupUrl(g.id) }));
       const expenseHits = q
-        ? expenses.searchExpenses(ctx, q, 20).map((e) => ({
+        ? (await expenses.searchExpenses(ctx, q, 20)).map((e) => ({
             id: `expense:${e.id}`,
             title: `${e.description} (${formatMoney(e.amount, e.currency)}, ${e.date})`,
             url: expenseUrl(e),
@@ -604,15 +608,15 @@ Bei Zahlungen: paid_by = Sender, split_among = [Empfänger].`,
       inputSchema: { id: z.string().describe('ID aus den Suchergebnissen, z. B. "expense:12"') },
       annotations: readOnly,
     },
-    wrap(({ id }) => {
+    wrap(async ({ id }) => {
       const [type, rawId] = id.split(':');
       const num = Number(rawId);
       if (!Number.isInteger(num)) throw badRequest('Ungültige ID. Erwartet z. B. "group:3" oder "expense:12".');
       let doc;
       if (type === 'group') {
-        const g = groupOut(ctx, num);
-        const recent = expenses.listExpenses(ctx, num, { limit: 20 }).expenses;
-        const members = groups.listMembers(ctx, num);
+        const g = await groupOut(ctx, num);
+        const recent = (await expenses.listExpenses(ctx, num, { limit: 20 })).expenses;
+        const members = await groups.listMembers(ctx, num);
         doc = {
           id,
           title: `Gruppe: ${g.name}`,
@@ -621,8 +625,8 @@ Bei Zahlungen: paid_by = Sender, split_among = [Empfänger].`,
           metadata: { type: 'group' },
         };
       } else if (type === 'expense') {
-        const e = expenses.getExpense(ctx, num);
-        const out = expenseOut(e, groups.listMembers(ctx, e.groupId));
+        const e = await expenses.getExpense(ctx, num);
+        const out = expenseOut(e, await groups.listMembers(ctx, e.groupId));
         doc = { id, title: e.description, text: JSON.stringify(out, null, 2), url: out.url, metadata: { type: e.kind } };
       } else {
         throw badRequest('Unbekannter Typ. Erwartet "group:<id>" oder "expense:<id>".');
