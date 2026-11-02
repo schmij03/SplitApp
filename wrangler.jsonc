@@ -1,0 +1,39 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "splitapp",
+  "main": "src/worker/index.ts",
+  "compatibility_date": "2026-10-01",
+  // nodejs_compat für das MCP-SDK, global_fetch_strictly_public für sichere CIMD-Abrufe (OAuth)
+  "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
+  "observability": { "enabled": true },
+  "vars": {
+    // Adresse der Web-Oberfläche auf GitHub Pages (für Links und CORS)
+    "WEB_URL": "https://schmij03.github.io/SplitApp/",
+    "ALLOW_REGISTRATION": "true"
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "splitapp",
+      // wird beim ersten Deployment von .github/workflows/deploy-worker.yml automatisch gesetzt
+      "database_id": "00000000-0000-0000-0000-000000000000",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "kv_namespaces": [
+    {
+      // Speicher der OAuth-Bibliothek (Clients, Grants, Tokens; nur als Hash)
+      "binding": "OAUTH_KV",
+      // wird beim ersten Deployment automatisch gesetzt
+      "id": "00000000000000000000000000000000"
+    }
+  ],
+  "ratelimits": [
+    {
+      // Schutz vor Passwort-Raten: 10 Anmeldeversuche pro Minute und IP
+      "name": "AUTH_LIMITER",
+      "namespace_id": "1001",
+      "simple": { "limit": 10, "period": 60 }
+    }
+  ]
+}

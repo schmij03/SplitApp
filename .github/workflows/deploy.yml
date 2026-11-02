@@ -1,0 +1,91 @@
+# Deployt den Cloudflare Worker (API + MCP) und danach die Web-Oberfläche auf GitHub Pages.
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+jobs:
+  worker:
+    name: Cloudflare Worker
+    runs-on: ubuntu-latest
+    outputs:
+      url: ${{ steps.deploy.outputs.url }}
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+
+      - name: Zugangsdaten prüfen
+        run: |
+          if [ -z "$CLOUDFLARE_API_TOKEN" ] || [ -z "$CLOUDFLARE_ACCOUNT_ID" ]; then
+            echo "::error::Bitte die Secrets CLOUDFLARE_API_TOKEN und CLOUDFLARE_ACCOUNT_ID im Repository hinterlegen (siehe README)."
+            exit 1
+          fi
+
+      - name: D1 und KV einrichten
+        run: node scripts/cf-provision.mjs
+
+      - name: Datenbank-Migrationen
+        run: npx wrangler d1 migrations apply DB --remote
+
+      - name: Worker deployen
+        id: deploy
+        env:
+          SPLITAPP_WEB_URL: ${{ vars.SPLITAPP_WEB_URL }}
+        run: |
+          # Standard: https://<owner>.github.io/<repo>/ (Owner wird von GitHub kleingeschrieben)
+          OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          WEB_URL="${SPLITAPP_WEB_URL:-https://$OWNER.github.io/${{ github.event.repository.name }}/}"
+          echo "Web-Oberfläche: $WEB_URL"
+          npx wrangler deploy --var "WEB_URL:$WEB_URL" | tee deploy.log
+          URL=$(grep -oE 'https://[a-zA-Z0-9.-]+\.workers\.dev' deploy.log | head -n1)
+          echo "url=$URL" >> "$GITHUB_OUTPUT"
+          echo "### Worker: $URL" >> "$GITHUB_STEP_SUMMARY"
+          echo "MCP-URL für Claude/ChatGPT: \`$URL/mcp\`" >> "$GITHUB_STEP_SUMMARY"
+
+  pages:
+    name: GitHub Pages
+    needs: worker
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Web-Oberfläche bauen
+        env:
+          VITE_API_URL: ${{ vars.SPLITAPP_API_URL || needs.worker.outputs.url }}
+        run: |
+          if [ -z "$VITE_API_URL" ]; then
+            echo "::error::Adresse des Workers unbekannt. Repository-Variable SPLITAPP_API_URL setzen (siehe README)."
+            exit 1
+          fi
+          echo "API: $VITE_API_URL"
+          npm run build
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist/web
+      - id: deployment
+        uses: actions/deploy-pages@v4

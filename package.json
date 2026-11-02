@@ -1,0 +1,40 @@
+{
+  "name": "splitapp",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Ausgaben in Gruppen teilen (ähnlich Splitwise). Web-App auf GitHub Pages, API und MCP-Server als Cloudflare Worker.",
+  "type": "module",
+  "scripts": {
+    "dev": "concurrently -n worker,web -c blue,green \"wrangler dev --port 8787\" \"vite\"",
+    "build": "vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc -p src/worker/tsconfig.json && tsc -p src/web/tsconfig.json",
+    "db:migrate:local": "wrangler d1 migrations apply DB --local",
+    "deploy:worker": "wrangler d1 migrations apply DB --remote && wrangler deploy",
+    "test": "node --import tsx --test tests/split.test.ts",
+    "test:e2e": "node scripts/e2e.mjs"
+  },
+  "dependencies": {
+    "@cloudflare/workers-oauth-provider": "^1.2.4",
+    "@modelcontextprotocol/sdk": "^1.32.2",
+    "hono": "^4.13.16",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20261102.1",
+    "@types/node": "^26.6.6",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^6.2.1",
+    "concurrently": "^10.0.6",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.5",
+    "wrangler": "^4.156.2"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
