@@ -6,16 +6,17 @@
   // nodejs_compat für das MCP-SDK, global_fetch_strictly_public für sichere CIMD-Abrufe (OAuth)
   "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
   "observability": { "enabled": true },
+  // Der Worker liefert die gebaute Oberfläche (npm run build) gleich mit aus.
+  // Läuft sie zusätzlich auf GitHub Pages, setzt der Deploy-Workflow WEB_URL auf deren Adresse.
+  "assets": { "directory": "./dist/web" },
   "vars": {
-    // Adresse der Web-Oberfläche auf GitHub Pages (für Links und CORS)
-    "WEB_URL": "https://schmij03.github.io/SplitApp/",
     "ALLOW_REGISTRATION": "true"
   },
   "d1_databases": [
     {
       "binding": "DB",
       "database_name": "splitapp",
-      // wird beim ersten Deployment von .github/workflows/deploy-worker.yml automatisch gesetzt
+      // wird beim Deploy (Knopf oder GitHub Actions) automatisch gesetzt
       "database_id": "00000000-0000-0000-0000-000000000000",
       "migrations_dir": "migrations"
     }

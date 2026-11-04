@@ -9,6 +9,7 @@ import path from 'node:path';
 
 const port = 8790 + Math.floor(Math.random() * 100);
 const persist = fs.mkdtempSync(path.join(os.tmpdir(), 'splitapp-e2e-'));
+fs.mkdirSync('dist/web', { recursive: true });
 const npx = process.platform === 'win32' ? 'npx.cmd' : 'npx';
 
 const migrate = spawnSync(npx, ['wrangler', 'd1', 'migrations', 'apply', 'DB', '--local', '--persist-to', persist], {
